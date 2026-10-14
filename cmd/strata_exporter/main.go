@@ -259,7 +259,7 @@ func render(s *snapshot, dur time.Duration) string {
 }
 
 func main() {
-	strataURL := flag.String("strata-url", envOr("STRATA_URL", "http://192.168.11.128:8088"), "base URL of the Strata runner")
+	strataURL := flag.String("strata-url", envOr("STRATA_URL", "http://127.0.0.1:8088"), "base URL of the Strata runner")
 	listen := flag.String("listen", envOr("LISTEN_ADDR", ":9137"), "address to serve /metrics on")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout for fetching Strata's metrics")
 	flag.Parse()

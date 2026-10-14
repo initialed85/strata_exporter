@@ -3,7 +3,8 @@
 set -e -m -x
 
 # this machine is arm64; the cluster nodes are amd64, so build on the x86 daemon
-export DOCKER_HOST="${DOCKER_HOST:-tcp://192.168.11.128:2375}"
+# Set DOCKER_HOST to a remote daemon if you build somewhere other than the local docker context.
+export DOCKER_HOST="${DOCKER_HOST:-}"
 
 cd "$(dirname -- "${BASH_SOURCE[0]}")"
 
