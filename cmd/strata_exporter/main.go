@@ -267,8 +267,18 @@ func main() {
 	client := &http.Client{Timeout: *timeout}
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		req, err := http.NewRequest(http.MethodGet, *strataURL+"/metrics", nil)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# fetch failed: %s\n", err)
+			return
+		}
+
+		// TODO(initialed85): parametize this
+		req.Header.Set("Authorization", "Bearer Password1")
+
 		start := time.Now()
-		res, err := client.Get(*strataURL + "/metrics")
+		res, err := client.Do(req)
 		if err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# fetch failed: %s\n", err)
