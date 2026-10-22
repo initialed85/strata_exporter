@@ -1,7 +1,5 @@
-FROM alpine:3.21
-RUN addgroup -S exporter && adduser -S -G exporter exporter
+FROM ubuntu:26.04
 WORKDIR /srv
 COPY ./entrypoint /srv/entrypoint
-USER exporter
 STOPSIGNAL SIGTERM
 CMD ["/srv/entrypoint"]
