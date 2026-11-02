@@ -1,0 +1,77 @@
+# Build, publish, and deploy strata-exporter (home-dev, namespace `observability`).
+#
+# Mirrors `build-tag-and-push.sh`: the Go binary is compiled to `./entrypoint` on the host (here the
+# step pod) and `docker/Dockerfile` only copies the artifact, so the image ships the exact bytes the
+# tests ran against and carries no toolchain. The two steps share this workflow's workspace PVC (the
+# compiler prefixes the volume with a per-workflow ULID, so steps in *different* files share nothing).
+#
+# The deploy step writes into `clusters/dev/applications/observability/kustomization.yaml`, which is
+# shared with longhorn-exporter: `kustomize edit set image` only touches the entry whose name matches,
+# and the plugin re-reads + retries on a non-fast-forward push, so two exporters can deploy from two
+# pipelines without clobbering each other.
+#
+# Builds are pinned to ocnus-ci-2's dockerd so this repo's layers stay warm on one node.
+steps:
+  - name: test
+    image: docker.io/library/golang:1.26
+    commands:
+      - go version
+      - go mod download
+      - test -z "$(gofmt -l .)" || { gofmt -l .; echo "FATAL gofmt - commit the output of gofmt -w ."; exit 1; }
+      - go vet ./...
+      - go test -v -count=1 ./...
+
+  - name: compile-binary
+    image: docker.io/library/golang:1.26
+    depends_on: [test]
+    commands:
+      - env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v -trimpath -o ./entrypoint ./cmd/strata_exporter
+      - ls -l ./entrypoint
+
+  - name: build-and-push
+    image: docker.io/library/docker:cli
+    privileged: true
+    depends_on: [compile-binary]
+    environment:
+      DOCKER_HOST: tcp://docker-ocnus-ci-2:2375
+      IMAGE: docker.io/initialed85/strata-exporter
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: dockerhub
+            key: username
+            target:
+              env: DOCKERHUB_USER
+          - name: dockerhub
+            key: token
+            target:
+              env: DOCKERHUB_TOKEN
+    commands:
+      - docker info --format 'daemon={{.Name}}'
+      - echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
+      - docker build --pull --progress=plain --platform=linux/amd64 -f docker/Dockerfile -t "$IMAGE:$CI_COMMIT_SHA" -t "$IMAGE:latest" .
+      - docker push "$IMAGE:$CI_COMMIT_SHA"
+      - docker push "$IMAGE:latest"
+      - docker inspect --format 'digests={{.RepoDigests}}' "$IMAGE:$CI_COMMIT_SHA"
+
+  - name: deploy-home-ops
+    image: docker.io/initialed85/wp-kustomize-deploy:latest
+    depends_on: [build-and-push]
+    settings:
+      image: docker.io/initialed85/strata-exporter
+      dir: clusters/dev/applications/observability
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: home-ops-deploy-key
+            key: id_ed25519
+            target:
+              env: PLUGIN_DEPLOY_KEY
+          - name: home-ops-deploy-key
+            key: known_hosts
+            target:
+              env: PLUGIN_KNOWN_HOSTS
+
+when:
+  - event: push
+    branch: master
