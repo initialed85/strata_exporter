@@ -321,7 +321,12 @@ func eventFromRequest(s *snapshot, r *request) *engineEvent {
 		ev.PrefillTokS = &v
 	}
 	if r.PromptTokens != nil && r.Reused != nil && *r.PromptTokens > 0 && *r.Reused >= 0 && *r.Reused <= *r.PromptTokens {
-		v := round3(float64(*r.Reused) / float64(*r.PromptTokens))
+		// Not rounded. Rounding a duration to 3dp kills binary noise and loses
+		// nothing a human can read; rounding a ratio to 3dp turns a genuine 0.0004
+		// cache hit into a flat zero, which is the difference between a model that
+		// almost never reuses and one that never reuses. The proxy surface leaves
+		// this one unrounded too, so both sides say the same thing.
+		v := float64(*r.Reused) / float64(*r.PromptTokens)
 		ev.CacheHitRate = &v
 	}
 	if r.Finish != "" && r.Finish != "stop" && r.Finish != "length" {
