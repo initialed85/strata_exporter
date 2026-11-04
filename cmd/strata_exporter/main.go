@@ -258,45 +258,102 @@ func render(s *snapshot, dur time.Duration) string {
 	return o.String()
 }
 
+// scraper turns one Strata JSON snapshot into Prometheus text.
+//
+// Strata guards /metrics with a bearer token and answers 401 to everything else, but which
+// token is correct is a deployment fact rather than something this program should know, so it
+// arrives at runtime through -strata-token / STRATA_TOKEN. An empty token sends no Authorization
+// header at all rather than a guessed one, which keeps the credential out of the source, out of
+// the published image and out of this public repository.
+type scraper struct {
+	client    *http.Client
+	strataURL string
+	token     string
+}
+
+// scrape returns the body to serve and the HTTP status to serve it with.
+//
+// A failed scrape answers 503 so Prometheus records a failed scrape instead of ingesting a
+// plausible-looking series set.
+func (s *scraper) scrape() (string, int) {
+	req, err := http.NewRequest(http.MethodGet, s.strataURL+"/metrics", nil)
+	if err != nil {
+		return downBody(0, "request build failed: "+err.Error()), http.StatusServiceUnavailable
+	}
+	if s.token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+	}
+
+	start := time.Now()
+	res, err := s.client.Do(req)
+	if err != nil {
+		return downBody(0, "fetch failed: "+err.Error()), http.StatusServiceUnavailable
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return downBody(res.StatusCode, "read failed: "+err.Error()), http.StatusServiceUnavailable
+	}
+	// Checked before decoding, so an unauthenticated or misrouted scrape says which one it is
+	// instead of surfacing as a JSON syntax error.
+	if res.StatusCode != http.StatusOK {
+		reason := fmt.Sprintf("HTTP %d from %s: %s (check -strata-token / STRATA_TOKEN)",
+			res.StatusCode, s.strataURL, clip(raw, 200))
+		return downBody(res.StatusCode, reason), http.StatusServiceUnavailable
+	}
+	var snap snapshot
+	if err := decodeSnapshot(raw, &snap); err != nil {
+		return downBody(res.StatusCode, "decode failed: "+err.Error()), http.StatusServiceUnavailable
+	}
+	return render(&snap, time.Since(start)), http.StatusOK
+}
+
+// decodeSnapshot parses Strata's JSON answer into the shape declared above. It exists as a named
+// function so the tests exercise the same decode path production uses rather than a copy of it.
+func decodeSnapshot(raw []byte, dst *snapshot) error {
+	return json.Unmarshal(raw, dst)
+}
+
+// downBody is what /metrics serves when the runner did not answer.
+//
+// strata_scrape_http_status is the difference between "down, wrong path or wrong token" (a real
+// status code) and "never got a response" (0) that strata_up 0 on its own cannot express.
+func downBody(status int, reason string) string {
+	o := &body{}
+	o.gauge("strata_up", "1 when Strata's /metrics answered.", 0)
+	o.gauge("strata_scrape_http_status", "HTTP status Strata answered with; 0 when no response was received.", float64(status))
+	fmt.Fprintf(o, "# scrape failed: %s\n", reason)
+	return o.String()
+}
+
+// clip keeps a snippet of somebody else's response body in a diagnostic line without letting it
+// grow unbounded.
+func clip(b []byte, n int) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
 func main() {
 	strataURL := flag.String("strata-url", envOr("STRATA_URL", "http://127.0.0.1:8088"), "base URL of the Strata runner")
+	strataToken := flag.String("strata-token", envOr("STRATA_TOKEN", ""), "bearer token for Strata; empty sends no Authorization header")
 	listen := flag.String("listen", envOr("LISTEN_ADDR", ":9137"), "address to serve /metrics on")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout for fetching Strata's metrics")
 	flag.Parse()
 
-	client := &http.Client{Timeout: *timeout}
+	sc := &scraper{
+		client:    &http.Client{Timeout: *timeout},
+		strataURL: *strataURL,
+		token:     *strataToken,
+	}
 
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		req, err := http.NewRequest(http.MethodGet, *strataURL+"/metrics", nil)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# fetch failed: %s\n", err)
-			return
-		}
-
-
-		start := time.Now()
-		res, err := client.Do(req)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# fetch failed: %s\n", err)
-			return
-		}
-		defer res.Body.Close()
-		raw, err := io.ReadAll(res.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# read failed: %s\n", err)
-			return
-		}
-		var s snapshot
-		if err := json.Unmarshal(raw, &s); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "# HELP strata_up 1 when Strata's /metrics answered.\n# TYPE strata_up gauge\nstrata_up 0\n# decode failed: %s\n", err)
-			return
-		}
+	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		out, code := sc.scrape()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		w.Write([]byte(render(&s, time.Since(start))))
+		w.WriteHeader(code)
+		w.Write([]byte(out))
 	})
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +364,12 @@ func main() {
 		w.Write([]byte(`<html><head><title>strata exporter</title></head><body><a href="/metrics">metrics</a></body></html>`))
 	})
 
-	log.Printf("strata_exporter listening on %s, scraping %s", *listen, *strataURL)
+	// Only whether a token is configured gets logged, never the token itself.
+	authMode := "none"
+	if *strataToken != "" {
+		authMode = "bearer"
+	}
+	log.Printf("strata_exporter listening on %s, scraping %s (auth: %s)", *listen, *strataURL, authMode)
 	log.Fatal(http.ListenAndServe(*listen, nil))
 }
 

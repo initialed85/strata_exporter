@@ -7,17 +7,26 @@ fields onto gauges and counters.
 ## Usage
 
 ```
-strata_exporter [-strata-url http://127.0.0.1:8088] [-listen :9137] [-timeout 10s]
+strata_exporter [-strata-url http://127.0.0.1:8088] [-strata-token TOKEN] [-listen :9137] [-timeout 10s]
 ```
 
 | Flag | Environment | Default | Purpose |
 | --- | --- | --- | --- |
 | `-strata-url` | `STRATA_URL` | `http://127.0.0.1:8088` | base URL of the Strata runner |
+| `-strata-token` | `STRATA_TOKEN` | *(empty)* | bearer token for Strata; empty sends no `Authorization` header |
 | `-listen` | `LISTEN_ADDR` | `:9137` | address serving `/metrics` |
 | `-timeout` | – | `10s` | timeout for fetching Strata's status |
 
-`strata_up 1` means the status endpoint answered; a failed poll emits `strata_up 0` plus the scrape
-duration, so a dashboard can tell "runner down" from "runner idle".
+Strata serves `/metrics` behind a bearer token and answers **401** to anything else, so the token
+has to be supplied. It is deliberately not baked into the binary: this repository is public and the
+image is published to Docker Hub, so a compiled-in credential would be a published one. Pass it from
+a Secret (see [Deploy](#deploy)); nothing prints it, and it never appears in the exposition.
+
+`strata_up 1` means the status endpoint answered with a decodable snapshot. A failed poll answers
+HTTP 503 with `strata_up 0` and `strata_scrape_http_status`, which separates "nothing answered" (`0`)
+from "answered, but rejected, redirected or not the snapshot" (`401`, `404`, a `200` that fails to
+decode) - `strata_up 0` on its own cannot tell those apart, and treating them as one condition is how
+a wrong token ends up looking like a broken runner.
 
 ## Metrics
 
@@ -70,6 +79,12 @@ spec:
           image: initialed85/strata-exporter:latest
           command: ["/srv/entrypoint"]           # the image has no ENTRYPOINT
           args: ["-strata-url", "http://strata.example:8088"]
+          env:
+            - name: STRATA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: strata-exporter
+                  key: strata-token
           ports:
             - name: metrics
               containerPort: 9137
