@@ -416,3 +416,34 @@ func TestRoutingTable(t *testing.T) {
 		}
 	}
 }
+
+// TestRingOrdersByCallTimeNotByEngineListOrder. Strata lists its recent calls newest
+// first; the cursor a consumer pages with is the ring's insertion order, so taking
+// the list as received would make cursor and ts run in opposite directions.
+func TestRingOrdersByCallTimeNotByEngineListOrder(t *testing.T) {
+	snap := &snapshot{Requests: []request{
+		{ID: "newest", Time: 1793773089.421},
+		{ID: "middle", Time: 1793773067.527},
+		{ID: "oldest", Time: 1793773048.123},
+	}}
+	evs := eventsFromSnapshot(snap)
+	got := []string{evs[0].ID, evs[1].ID, evs[2].ID}
+	want := []string{"oldest", "middle", "newest"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ring order is %v, want oldest-first %v", got, want)
+		}
+	}
+	// And the ring hands a page back in the same order the cursor advances in.
+	ring := newEventRing(64)
+	for _, ev := range evs {
+		ring.push(ev)
+	}
+	page, cursor, _ := ring.since(0, 0)
+	if len(page) != 3 || page[0].ID != "oldest" || page[2].ID != "newest" {
+		t.Fatalf("page order wrong: %+v", page)
+	}
+	if page[2].ID != "newest" && cursor != 3 {
+		t.Fatalf("cursor should sit at the newest record, got %d", cursor)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -257,6 +258,15 @@ type eventsPage struct {
 // eventsFromSnapshot converts the recent-request list of one snapshot into
 // records. Everything a call's identity needs comes from the snapshot itself,
 // so this is a pure function and the tests do not need an HTTP server.
+// eventsFromSnapshot converts the recent-call list of one snapshot into records,
+// ordered oldest call first.
+//
+// The re-ordering is not cosmetic. Strata lists its recent calls newest first, so
+// pushing them as received would make the ring's insertion order - and therefore
+// the cursor a consumer pages with - run backwards against the timestamps in the
+// records it returns. A page whose cursor ascends while its ts descends is the
+// kind of thing that gets quietly averaged into a dashboard and turns up later as
+// a join that cannot be explained.
 func eventsFromSnapshot(s *snapshot) []*engineEvent {
 	out := make([]*engineEvent, 0, len(s.Requests))
 	for i := range s.Requests {
@@ -271,6 +281,7 @@ func eventsFromSnapshot(s *snapshot) []*engineEvent {
 		}
 		out = append(out, eventFromRequest(s, &r))
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TSEpoch < out[j].TSEpoch })
 	return out
 }
 
